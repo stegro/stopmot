@@ -1,0 +1,323 @@
+#!/bin/bash
+# set -x
+DIALOG=tcdialog
+# work on jpg or png files? jpg may be faster obtained from the camera.
+FORMAT="png"
+
+INTERVALL_SEC=1.0
+
+OVERLAY_FILE=".overlay.$FORMAT"
+CAPTURE_IMAGE=".capture.$FORMAT"
+CAPTURE_IMAGE="00000001.$FORMAT"
+TMP_FILE=".tmp.$FORMAT"
+
+MODE_DIFF="diff"
+MODE_OVERLAY="overlay"
+MODE_LINEAR_BURN="linear-burn"
+MODE_LINEAR_DODGE="linear-dodge"
+MODE_COLOR_DODGE="color-dodge"
+MODE_COLOR_BURN="color-burn"
+MODE_MULTIPLY="multiply"
+MODE_LIGHTEN="lighten"
+MODE_DARKEN="darken"
+MODE_LINEAR_LIGHT="linear-light"
+MODE_VIVID_LIGHT="vivid-light"
+MODE_SIMPLE="simple"
+MODE=$MODE_DARKEN
+N_OVERLAY_IMAGES=2
+
+MASK=".mask.$FORMAT"
+MAGICK_LOG=".magick.log"
+
+VIDEO_FILE="film.mpeg"
+FPS=25
+BITRATE=2000k
+
+
+PREFIX="frame"
+subshell_pid=-1
+
+delete_image() {
+last_filename=$(ls $PREFIX*.$FORMAT | sort --version-sort | tail -n 1)
+if [ -n "$last_filename" ]
+then
+rm "$last_filename"
+fi
+}
+
+get_last_image_number(){
+last_filename=$(ls $PREFIX*.$FORMAT | sort --version-sort | tail -n 1)
+if [ -n $last_filename ]
+then
+last_number=${last_filename#$PREFIX}
+last_number=${last_number%".$FORMAT"}
+else
+last_number=-1
+fi
+echo $last_number
+}
+
+capture_image(){
+# new_number=$(( $(get_last_image_number) + 1 ))
+#PROBLEM: Dieser Befehl geht nur bis 00007. Ab 00008 gibt es den Error:
+# bash: 00008: Der Wert ist zu groß für die aktuelle Basis. (Fehlerverursachendes Zeichen ist \"00008\").
+
+new_number=$(bc <<< "$(get_last_image_number) + 1 ")
+# echo "new_number = $new_number"
+mv $CAPTURE_IMAGE $PREFIX$(printf "%05d" $new_number).$FORMAT
+}
+
+select_mode(){
+statusdiff="off"
+statusoverlay="off"
+statuslinearburn="off"
+statuslineardodge="off"
+statuscolorburn="off"
+statuscolordodge="off"
+statusmultiply="off"
+statuslighten="off"
+statusdarken="off"
+statuslinearlight="off"
+statusvividlight="off"
+statussimple="off"
+[ $MODE == $MODE_DIFF ] && statusdiff="on"
+[ $MODE == $MODE_OVERLAY ] && statusoverlay="on"
+[ $MODE == $MODE_LINEAR_BURN ] && statuslinearburn="on"
+[ $MODE == $MODE_LINEAR_DODGE ] && statuslineardodge="on"
+[ $MODE == $MODE_COLOR_BURN ] && statuscolorburn="on"
+[ $MODE == $MODE_COLOR_DODGE ] && statuscolordodge="on"
+[ $MODE == $MODE_MULTIPLY ] && statusmultiply="on"
+[ $MODE == $MODE_DARKEN ] && statusdarken="on"
+[ $MODE == $MODE_LIGHTEN ] && statuslighten="on"
+[ $MODE == $MODE_LINEAR_LIGHT ] && statuslinearlight="on"
+[ $MODE == $MODE_VIVID_LIGHT ] && statusvividlight="on"
+[ $MODE == $MODE_SIMPLE ] && statussimple="on"
+choice=$($DIALOG --radiolist "Anzeigemodus" 40 80 50 \
+    "$MODE_DIFF" "Differenzen zeigen" $statusdiff \
+    "$MODE_OVERLAY" "overlay Modus" $statusoverlay \
+    "$MODE_LINEAR_BURN" "linear-burn Modus" $statuslinearburn \
+    "$MODE_LINEAR_DODGE" "linear-dodge Modus" $statuslineardodge \
+    "$MODE_COLOR_BURN" "color-burn Modus" $statuscolorburn \
+    "$MODE_COLOR_DODGE" "color-dodge Modus" $statuscolordodge \
+    "$MODE_MULTIPLY" "multiply Modus" $statusmultiply \
+    "$MODE_DARKEN" "darken Modus" $statusdarken \
+    "$MODE_LIGHTEN" "lighten Modus" $statuslighten \
+    "$MODE_LINEAR_LIGHT" "linear-light Modus" $statuslinearlight \
+    "$MODE_VIVID_LIGHT" "vivid-light Modus" $statusvividlight \
+    "$MODE_SIMPLE" "keine Ueberlagerung, einfache Anzeige" $statussimple 3>&1 1>&2 2>&3 3>&-)
+    #multiply: The source is multiplied by the destination and replaces the destination. The resultant color is always at least as dark as either of the two constituent colors. Multiplying any color with black produces black. Multiplying any color with white leaves the original color unchanged.
+    #darken:Selects the darker of the destination and source colors. The destination is replaced with the source when the source is darker, otherwise it is left unchanged.
+
+    #lighten: Selects the lighter of the destination and source colors. The destination is replaced with the source when the source is lighter, otherwise it is left unchanged.
+
+if [ $? -ne 0 ]
+then
+    return 1
+fi
+MODE=$choice
+
+result=$($DIALOG --inputbox "Zahl ueberlagerter Frames" 7 60 $N_OVERLAY_IMAGES 3>&1 1>&2 2>&3 3>&-)
+if [ $? -ne 0 ]
+then
+    return 1
+else
+    N_OVERLAY_IMAGES=$result
+fi
+return 0
+}
+
+
+
+render_animation(){
+_tempfile=".render.tmp"
+ffmpeg -i "$PREFIX%05d.$FORMAT" -r $FPS -b $BITRATE -y $VIDEO_FILE &> $_tempfile &
+$DIALOG --tailbox $_tempfile 40 80
+rm $_tempfile
+}
+
+play_animation(){
+if [ -a $VIDEO_FILE ]
+then
+    totem $VIDEO_FILE &> /dev/null &
+    # mplayer $VIDEO_FILE &> /dev/null &
+    # vlc $VIDEO_FILE &> /dev/null &
+else
+    $DIALOG --msgbox "Die Videodatei $VIDEODATEI wurde noch nicht erzeugt." 6 42
+fi    
+}
+
+quit_program() {
+    $DIALOG --yesno "Bist du sicher?" 5 30 
+    if [ $? -eq 0 ]
+    then
+	clear
+	kill $subshell_pid
+	killall display
+	exit 0
+    fi
+}
+
+get_snapshot() {
+# vlc -I dummy v4l2:///dev/video0 --video-filter scene \
+#  --no-audio --scene-path ./ --scene-prefix "capture" \
+#  --scene-format $FORMAT vlc://quit --run-=1
+# and insert at the beginning of the script:
+# CAPTURE_IMAGE="capture00001.$FORMAT"
+
+   
+# time ffmpeg -t 1 -f video4linux2 -s 320x240 -i /dev/video0 -r 1 -f image2 $CAPTURE_IMAGE &>  /dev/null
+    
+mplayer -vo $FORMAT -frames 1 tv:// &> /dev/null
+# and insert at the beginning of the script:
+# CAPTURE_IMAGE="00000001.$FORMAT"
+
+# UNTESTED ALTERNATIVES:
+# dvgrab --size 500 --autosplit
+# streamer -c /dev/video0 -b 16 -o .jpe
+
+}
+
+
+################ End of function definitions ##############
+
+$DIALOG --msgbox "Dies ist $(basename $0), das Bashscript zum erstellen von Stopmotion Animationen. Zuerst muss im Folgenden der Anzeigemodus gewaehlt werden." 8 70
+select_mode
+if [ $? -ne 0 ]
+then
+    exit 0
+fi
+
+convert -background lightblue -fill blue -pointsize 72 label:$(basename $0) \
+          $OVERLAY_FILE
+display $OVERLAY_FILE &
+
+
+(
+while [ 1 ]
+do
+    get_snapshot
+    if [ -z "$(ls $PREFIX*$FORMAT 2> /dev/null )" ]
+    then
+	cp $CAPTURE_IMAGE $OVERLAY_FILE
+    else
+	cp $CAPTURE_IMAGE $OVERLAY_FILE
+
+	counter=0
+	for file in `ls $PREFIX*$FORMAT 2> /dev/null | sort --version-sort | tail -n $N_OVERLAY_IMAGES`
+	do
+	    if [ "$MODE" == "$MODE_OVERLAY" ]
+	    then
+		# this mode does not work (yet) as intended.
+		
+ # If you don't want that 'shadow' of the second image, from IM v6.4.2-8 you can add a "-compose src" to the options to remove it. 
+ # As you can see even though you can't really see any difference between GIF and the JPEG versions of the image, "compare" reports a lot of differences. 
+ # By using a small Fuzz Factor you can ask IM to ignore these minor differences between the two images.
+		mv -f $OVERLAY_FILE $TMP_FILE
+		# compare -fuzz 7% $file $CAPTURE_IMAGE \
+                   # -compose Src -highlight-color Gray -lowlight-color Black \
+                   # $MASK
+		# composite $TMP_FILE $file $MASK $OVERLAY_FILE
+		   composite $file $TMP_FILE \
+                    -compose overlay  $OVERLAY_FILE
+		   
+	    elif [ "$MODE" == "$MODE_DIFF" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		composite $file $TMP_FILE \
+                    -compose difference  $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_LINEAR_BURN" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		convert -compose linear-burn -composite -gravity south \
+		    $TMP_FILE $file $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_LINEAR_DODGE" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		convert -compose linear-dodge -composite -gravity south \
+		    $TMP_FILE $file $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_COLOR_BURN" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		convert -compose color_burn -composite -gravity south \
+		    $TMP_FILE $file $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_COLOR_DODGE" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		convert -compose color-dodge -composite -gravity south \
+		    $TMP_FILE $file $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_MULTIPLY" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		convert -compose multiply -composite -gravity south \
+		    $TMP_FILE $file $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_LIGHTEN" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		convert -compose lighten -composite -gravity south \
+		    $TMP_FILE $file $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_DARKEN" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		convert -compose darken -composite -gravity south \
+		    $TMP_FILE $file $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_LINEAR_LIGHT" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		convert -compose linear-light -composite -gravity south \
+		    $TMP_FILE $file $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_VIVID_LIGHT" ]
+	    then
+		mv -f $OVERLAY_FILE $TMP_FILE
+		convert -compose vivid-light -composite -gravity south \
+		    $TMP_FILE $file $OVERLAY_FILE
+	    elif [ "$MODE" == "$MODE_SIMPLE" ]
+	    then
+		break # do nothing
+	    fi
+	    counter=$(( $counter + 1 ))
+	done
+    fi
+    # mogrify -sample '200%' "$OVERLAY_FILE"
+    display -remote "$OVERLAY_FILE"
+    # sleep $INTERVALL_SEC
+
+done
+) &> $MAGICK_LOG &
+subshell_pid=$!
+renice +10 $subshell_pid
+echo "Parallel process $subshell_pid started ..."
+gnome-terminal -t "ImageMagick Messages and Errors" -e "tail -f $MAGICK_LOG" &
+
+
+while [ 1 ]
+do
+ret=$($DIALOG --backtitle "stopmot - The Stopmotion Script" \
+ --title "Hauptmenue" \
+ --cancel-label "Quit"\
+ --menu "Bewegen mit [HOCH] und [RUNTER], waehlen mit [ENTER]." \
+  20 78 10 \
+ "capture" "Ein Bild aufnehmen." \
+ "delete" "Das letzte Bild loeschen." \
+ "render" "Ein MPEG Video aus der Bilderreihe erstellen." \
+ "play" "Video abspielen." \
+ "mode" "Anzeigemodus veraendern." \
+ "quit" "Das Programm verlassen." 3>&1 1>&2 2>&3 3>&-)
+if [ $? -eq 1 ]
+then
+	quit_program
+else
+menuitem=$ret
+# $DIALOG --msgbox "Gewaehlt wurde:\n $menuitem" 6 42
+case $menuitem in
+        "capture") capture_image;;
+        "delete") delete_image;;
+        "render") render_animation;;
+        "play") play_animation;;
+        "mode") select_mode;;
+        "quit") quit_program;;
+esac
+fi
+done
+
+
+
